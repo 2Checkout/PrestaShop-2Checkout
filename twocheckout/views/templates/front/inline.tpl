@@ -89,6 +89,7 @@
                 TwoCoInlineCart.products.removeAll();
                 TwoCoInlineCart.products.addMany({$products|@json_encode nofilter});
                 TwoCoInlineCart.billing.setData({$billing_address|@json_encode nofilter});
+                TwoCoInlineCart.billing.setCompanyName('{$billing_address['company-name']}');
                 TwoCoInlineCart.shipping.setData({$shipping_address|@json_encode nofilter});
                 TwoCoInlineCart.cart.checkout();
             };

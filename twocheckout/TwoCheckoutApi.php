@@ -114,7 +114,7 @@ class TwoCheckoutApi
 
         $headers[] = 'Content-Type: application/json';
         $headers[] = 'Accept: application/json';
-        $headers[] = 'X-Avangate-Authentication: code="' . $this->sellerId . '" date="' . $gmtDate . '" hash="' . $hash . '"';;
+        $headers[] = 'X-Avangate-Authentication: code="' . $this->sellerId . '" date="' . $gmtDate . '" hash="' . $hash . '"';
 
         return $headers;
     }
