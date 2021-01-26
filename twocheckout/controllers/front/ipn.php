@@ -234,6 +234,7 @@ class TwocheckoutIpnModuleFrontController extends ModuleFrontController
                 case self::ORDER_STATUS_COMPLETE:
                     $this->order->setCurrentState(Configuration::get('PS_OS_PAYMENT'));
                     $this->_createTransactionId($params);
+                    $this->_isChargeBack($params);
                     break;
 
                 case self::ORDER_STATUS_REFUND:
@@ -285,6 +286,52 @@ class TwocheckoutIpnModuleFrontController extends ModuleFrontController
             }
 
             $this->order->save();
+        }
+    }
+
+    /**
+     * check for Chargeback resolution and code & add a message (private) to order
+     * @param $params
+     */
+    private function _isChargeBack($params)
+    {
+        $reasons = [
+            'UNKNOWN'                  => 'Unknown', //default
+            'MERCHANDISE_NOT_RECEIVED' => 'Order not fulfilled/not delivered',
+            'DUPLICATE_TRANSACTION'    => 'Duplicate order',
+            'FRAUD / NOT_RECOGNIZED'   => 'Fraud/Order not recognized',
+            'FRAUD'                    => 'Fraud',
+            'CREDIT_NOT_PROCESSED'     => 'Agreed refund not processed',
+            'NOT_RECOGNIZED'           => 'New/renewal order not recognized',
+            'AUTHORIZATION_PROBLEM'    => 'Authorization problem',
+            'INFO_REQUEST'             => 'Information request',
+            'CANCELED_RECURRING'       => 'Recurring payment was canceled',
+            'NOT_AS_DESCRIBED'         => 'Product(s) not as described/not functional'
+        ];
+
+        // we need to mock up a message with some params in order to add this note
+        if (!empty($params['CHARGEBACK_RESOLUTION']) && !empty($params['CHARGEBACK_REASON_CODE'])) {
+            $thread = new CustomerThreadCore();
+            $thread->email = 'ChargeBack@2checkout.com';
+            $thread->status = 'open';
+            $thread->token = $this->order->reference; // we need to fill this too (i chose the reference)
+            $thread->id_shop = $this->order->id_shop;
+            $thread->id_lang = $this->order->id_lang;
+            $thread->id_contact = 0;
+            $thread->id_customer = $this->order->id_customer;
+            $thread->id_order = $this->order->id;
+            $thread->save();
+
+            $why = $reasons[trim($params['CHARGEBACK_REASON_CODE'])] ?? $reasons['UNKNOWN'];
+            $message = '2Checkout chargeback status is ' . $params['CHARGEBACK_RESOLUTION'];
+            $message .= '. Reason: ' . $why . '!';
+
+            $orderMessage = new CustomerMessageCore();
+            $orderMessage->id_customer_thread = $thread->id;
+            $orderMessage->ip_address = null;
+            $orderMessage->message = $message;
+            $orderMessage->private = true;
+            $orderMessage->save();
         }
     }
 
