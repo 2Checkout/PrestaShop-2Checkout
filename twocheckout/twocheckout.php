@@ -2,6 +2,19 @@
 
 use PrestaShop\PrestaShop\Core\Payment\PaymentOption;
 
+require_once 'libs/interfaces/interface-2co-arrayable.php';
+require_once 'libs/interfaces/interface-2co-jsonable.php';
+require_once 'libs/abstract/abstract-2co-entity.php';
+
+require_once 'libs/class-twocheckout-settings.php';
+
+require_once 'libs/includes/class-mobile-detect.php';
+require_once 'libs/includes/class-twocheckout-checkout.php';
+require_once 'libs/includes/class-twocheckout-customer.php';
+require_once 'libs/includes/class-twocheckout-helper.php';
+require_once 'libs/includes/class-twocheckout-logger.php';
+require_once 'libs/includes/class-twocheckout-refund.php';
+
 require_once 'TwoCheckoutApi.php';
 
 if ( ! defined( '_PS_VERSION_' ) ) {
@@ -23,6 +36,8 @@ class Twocheckout extends \PaymentModule {
     public $is_eu_compatible;
     public $extra_mail_vars;
     public $confirmUninstall;
+    public $tco_settings;
+    public $logger;
     protected $_html = '';
     protected $_postErrors = [];
     /**
@@ -71,10 +86,12 @@ class Twocheckout extends \PaymentModule {
         $this->currencies             = true;
         $this->currencies_mode        = 'checkbox';
 
-        $this->tcoApi = new TwoCheckoutApi();
-        $this->tcoApi->setSecretKey( Configuration::get( 'TWOCHECKOUT_SECRET_KEY' ) );
-        $this->tcoApi->setSellerId( Configuration::get( 'TWOCHECKOUT_SID' ) );
-        $this->tcoApi->setSecretWord( Configuration::get( 'TWOCHECKOUT_SECRET_WORD' ) );
+        $this->logger       = new Twocheckout_Logger( __FILE__ );
+        $this->tcoApi       = new TwoCheckoutApi();
+        $this->tco_settings = new Twocheckout_Settings();
+        $this->tcoApi->setSecretKey( $this->tco_settings->getSecretKey() );
+        $this->tcoApi->setSellerId( $this->tco_settings->getSid() );
+        $this->tcoApi->setSecretWord( $this->tco_settings->getSecretWord() );
 
         $this->bootstrap = true;
         parent::__construct();
@@ -255,10 +272,9 @@ class Twocheckout extends \PaymentModule {
     public function install() {
 
         if ( parent::install()
+             && $this->registerHook( 'displayHeader' )
              && $this->registerHook( 'paymentOptions' )
-             && $this->registerHook( 'actionValidateOrder' )
              && $this->registerHook( 'displayOrderConfirmation' )
-             && $this->registerHook( 'paymentReturn' )
              && $this->registerHook( 'actionProductCancel' )
              && $this->registerHook( 'displayBackOfficeHeader' )
              && $this->registerHook( 'displayAdminOrder' )
@@ -289,7 +305,14 @@ class Twocheckout extends \PaymentModule {
         Configuration::deleteByName( 'TWOCHECKOUT_STYLE_DEFAULT_MODE' );
         Configuration::deleteByName( 'TWOCHECKOUT_STYLE' );
 
-        return parent::uninstall();
+        return $this->unregisterHook( 'displayHeader' )
+               && $this->unregisterHook( 'paymentOptions' )
+               && $this->unregisterHook( 'displayOrderConfirmation' )
+               && $this->unregisterHook( 'actionProductCancel' )
+               && $this->unregisterHook( 'displayBackOfficeHeader' )
+               && $this->unregisterHook( 'displayAdminOrder' )
+               && $this->unregisterHook( 'displayAdminOrderTop' )
+               && parent::uninstall();
     }
 
     /**
@@ -503,6 +526,56 @@ class Twocheckout extends \PaymentModule {
      *
      * @return mixed
      */
+
+    public function hookHeader( $params ) {
+        $returnContent = '';
+
+        $allValues = Tools::getAllValues();
+        $resources = [];
+        $link      = '';
+
+        if ( Tools::getValue( 'controller' ) == "order" ) {
+            if ( ! $this->checkActiveModule() ) {
+                return;
+            }
+            $cart = isset( $params['cart'] ) ? $params['cart'] : $this->context->cart;
+
+            if ( $this->tco_settings->getPaymentType() == 1 ) {
+                //load scripts for INLINE
+                $this->context->controller->registerJavascript( $this->name . '-gen-url-context',
+                    'modules/' . $this->name . '/views/assets/js/inline_validate.js'
+                );
+                Media::addJsDef( array(
+                    'reloadWhenInlineClose' => version_compare( _PS_VERSION_, '1.7.7', '>=' )
+                ) );
+                $resources[] = _PS_BASE_URL_ . __PS_BASE_URI__ . 'modules/' . $this->name . '/views/assets/js/inline_validate.js' . '?v=' . $this->version;
+
+            } elseif ( $this->tco_settings->getPaymentType() == 2 ) {
+                //No script needed to load for this.
+
+            } else {
+                //load convert plus scripts
+                $this->context->controller->registerJavascript( $this->name . '-gen-url-context',
+                    'modules/' . $this->name . '/views/assets/js/cp_validate.js'
+                );
+                $resources[] = _PS_BASE_URL_ . __PS_BASE_URI__ . 'modules/' . $this->name . '/views/assets/js/cp_validate.js' . '?v=' . $this->version;
+            }
+
+            if ( ! empty( $resources ) ) {
+                $link = $this->context->link->getModuleLink( $this->name, 'generateUrl',
+                    [ 'module_name' => $this->name, 'cart_id' => $cart->id ], true );
+                Media::addJsDef( array(
+                    'tco_verify_url' => $link
+                ) );
+                $this->context->smarty->assign( 'resources', $resources );
+            }
+
+            $returnContent .= $this->context->smarty->fetch( 'module:' . $this->name . '/views/templates/front/prefetch.tpl' );
+        }
+
+        return $returnContent;
+    }
+
     public function hookDisplayOrderConfirmation( $params ) {
         if ( ( ! isset( $params['order'] ) || $params['order']->module != $this->name ) || ! $this->active ) {
             return false;
@@ -531,7 +604,7 @@ class Twocheckout extends \PaymentModule {
         Tools::generateIndex();
 
         if ( Configuration::get( 'TWOCHECKOUT_TYPE' ) == 2 ) { // api with 2payJs
-            return [ $this->getApiPaymentOption() ];
+            return [ $this->getApiPaymentOption( $params['cart'] ) ];
         } elseif ( Configuration::get( 'TWOCHECKOUT_TYPE' ) == 1 ) { // inline
             return [ $this->getInlinePaymentOption() ];
         } else { // Convert+
@@ -557,7 +630,7 @@ class Twocheckout extends \PaymentModule {
                 }
 
                 //Prepare comment and get only the 150 accepted characters.
-                $refundCommentStr = Tools::getValue( '2co-refund-comment', '' );
+                $refundCommentStr = Tools::getValue( 'tco-refund-comment', '' );
                 $refundComment    = trim( substr( $refundCommentStr, 0, 150 ) );
                 $refundReason     = self::REFUND_REASON;
 
@@ -662,10 +735,15 @@ class Twocheckout extends \PaymentModule {
     private function getRefundCommentBox() {
         $this->context->smarty->assign(
             [
-                'tco_refund_comment_box'    => $this->l( 'Refund Comment...' ),
-                'tco_refund_max_length_str' => $this->l( '*Max 150 characters.' ),
+                'tco_refund_comment_box'    => $this->trans( 'Refund Comment...' ),
+                'tco_refund_max_length_str' => $this->trans( '*Max 150 characters.' ),
                 'tco_refund_max_length'     => 150
             ] );
+
+        if ( version_compare( _PS_VERSION_, '1.7.7', '>=' ) ) {
+            return $this->context->smarty->fetch( 'module:twocheckout/views/templates/hook/refundCommentBox17x.tpl' );
+
+        }
 
         return $this->context->smarty->fetch( 'module:twocheckout/views/templates/hook/refundCommentBox.tpl' );
     }
@@ -676,10 +754,20 @@ class Twocheckout extends \PaymentModule {
         foreach ( $products as $prod_id => $params ) {
             $prods_array[ $prod_id ] = $params['product_quantity'];
         }
+        $notAllProductsAlert = $this->getTranslator()->trans( 'Please select all products!' );
+        $hasPaidShipping     = $this->hasPaidShipping( $order->getShipping() );
+        $shippingMsgAlert    = $this->getTranslator()->trans( 'Order does not have free shipping. Please include that in full refund!' );
         $this->context->smarty->assign(
             [
-                'tco_refund_products_list' => json_encode( $prods_array )
+                'tco_refund_products_list' => json_encode( $prods_array ),
+                'not_all_products_alert'   => $notAllProductsAlert,
+                'has_paid_shipping'        => $hasPaidShipping,
+                'shipping_msg_alert'       => $shippingMsgAlert
             ] );
+
+        if ( version_compare( _PS_VERSION_, '1.7.7', '>=' ) ) {
+            return $this->context->smarty->fetch( 'module:twocheckout/views/templates/hook/refundItemsCorrection17x.tpl' );
+        }
 
         return $this->context->smarty->fetch( 'module:twocheckout/views/templates/hook/refundItemsCorrection.tpl' );
     }
@@ -694,6 +782,11 @@ class Twocheckout extends \PaymentModule {
     }
 
     private function disablePartialRefund() {
+
+        if ( version_compare( _PS_VERSION_, '1.7.7', '>=' ) ) {
+            return $this->context->smarty->fetch( 'module:twocheckout/views/templates/hook/disablePartialRefund17x.tpl' );
+        }
+
         return $this->context->smarty->fetch( 'module:twocheckout/views/templates/hook/disablePartialRefund.tpl' );
     }
 
@@ -727,8 +820,7 @@ class Twocheckout extends \PaymentModule {
         }
         $newOption = new PaymentOption();
         $newOption->setCallToActionText( 'Pay with 2Checkout' )
-                  ->setAction( $this->context->link->getModuleLink( $this->name, 'validation', [], true ) )
-                  ->setForm( $this->generateInlineForm() );
+                  ->setAction( 'javascript:TwocheckoutInlineCheckout()' );
 
         return $newOption;
     }
@@ -742,8 +834,7 @@ class Twocheckout extends \PaymentModule {
         }
         $newOption = new PaymentOption();
         $newOption->setCallToActionText( 'Pay with 2Checkout' )
-                  ->setAction( $this->context->link->getModuleLink( $this->name, 'validation', [], true ) )
-                  ->setForm( $this->generateForm() );
+                  ->setAction( 'javascript:TwocheckoutCPCheckout()' );
 
         return $newOption;
     }
@@ -753,15 +844,15 @@ class Twocheckout extends \PaymentModule {
      * @return PaymentOption
      * @throws SmartyException
      */
-    public function getApiPaymentOption() {
+    public function getApiPaymentOption( $cart ) {
         if ( ! $this->active ) {
             return;
         }
         $newApiOption = new PaymentOption();
-        $newApiOption->setCallToActionText( $this->l( 'Pay with 2Checkout' ) )
-                     ->setForm( $this->generateApiForm() )
-                     ->setBinary( true )
-                     ->setAction( $this->context->link->getModuleLink( $this->name, 'validation', [], true ) );
+        $newApiOption->setCallToActionText($this->l('Pay with 2Checkout'))
+                     ->setAction('javascript:Twocheckout2PayJs()')
+                     ->setBinary(true)
+                     ->setForm($this->generateApiForm($cart));
 
         return $newApiOption;
     }
@@ -771,7 +862,7 @@ class Twocheckout extends \PaymentModule {
      * @return string
      * @throws SmartyException
      */
-    protected function generateApiForm() {
+    protected function generateApiForm( $cart ) {
 
         // get style and remove newlines
         if ( Configuration::get( 'TWOCHECKOUT_STYLE_DEFAULT_MODE' ) ) {
@@ -780,7 +871,8 @@ class Twocheckout extends \PaymentModule {
             $style = trim( preg_replace( '/\s\s+/', ' ', Configuration::get( 'TWOCHECKOUT_STYLE' ) ) );
         }
         $this->context->smarty->assign( [
-            'action'   => $this->context->link->getModuleLink( $this->name, 'validation', [], true ),
+            'action'   => $this->context->link->getModuleLink( $this->name, 'generateUrl',
+                [ 'module_name' => $this->name, 'cart_id' => $cart->id ], true ),
             'sellerId' => Configuration::get( 'TWOCHECKOUT_SID' ),
             'style'    => $style,
             'script'   => Media::getMediaPath( _PS_MODULE_DIR_ . $this->name . '/views/assets/js/twocheckout.js' ),
@@ -815,197 +907,6 @@ class Twocheckout extends \PaymentModule {
         ] );
 
         return $this->context->smarty->fetch( 'module:twocheckout/views/templates/hook/payment_options.tpl' );
-    }
-
-    /**
-     * @param $params
-     * this hook applies only for hosted and inline, NOT api
-     *
-     * @return string|void
-     * @throws \Exception
-     */
-    public function hookActionValidateOrder( $params ) {
-
-        /**
-         * Verify if this module is enabled
-         */
-        if ( ! $this->active ) {
-            return;
-        }
-
-        /**
-         * Order is validated and added to the database
-         * Grab necessary params and redirect to 2checkout
-         */
-        $this->module = Module::getInstanceByName( Tools::getValue( 'module' ) );
-
-        if ( $this->module->name !== $this->name ) {
-            return;
-        }
-
-        /** @var $cart \Cart */
-        $cart = $params['cart'];
-        /** @var $order \Order */
-        $order = $params['order'];
-        /** @var $customer \Customer */
-        $customer = $params['customer'];
-        /** @var $currency \Currency */
-        $currency = $params['currency'];
-        $orderId  = Order::getIdByCartId( $cart->id );
-        /** @var \Address $invoice */
-        $invoice = new Address( intval( $cart->id_address_invoice ) );
-
-        $returnUrl       = _PS_BASE_URL_ . __PS_BASE_URI__ . 'index.php?controller=order-confirmation&id_cart=' . (int) $cart->id . '&id_module=' . (int) $this->module->id . '&id_order=' . $orderId . '&key=' . $customer->secure_key;
-        $countryIsoCode  = Country::getIsoById( $invoice->id_country );
-        $stateIsoCode    = State::getNameById( $invoice->id_state );
-        $languageIsoCode = Language::getIsoById( $order->id_lang );
-        $source          = 'PRESTASHOP_' . str_replace( '.', '_', _PS_VERSION_ );
-
-        switch ( (int) Configuration::get( 'TWOCHECKOUT_TYPE' ) ) {
-            case 2: //2payJs
-                $currencyIso = strtolower( $currency->iso_code );
-                $orderParams = [
-                    'Currency'          => $currencyIso,
-                    'Language'          => $languageIsoCode,
-                    'Country'           => $countryIsoCode,
-                    'CustomerIP'        => $this->getCustomerIp(),
-                    'Source'            => $source,
-                    'ExternalReference' => $orderId,
-                    'Items'             => $this->getItem( $orderId, $cart->getOrderTotal() ),
-                    'BillingDetails'    => $this->getBillingDetails( $invoice, $stateIsoCode, $countryIsoCode,
-                        $customer->email ),
-                    'PaymentDetails'    => $this->getPaymentDetails( Tools::getValue( 'ess_token' ), $currencyIso,
-                        $cart->id, $orderId ),
-                ];
-
-                $apiResponse = $this->tcoApi->call( 'orders', $orderParams );
-
-                if ( ! isset( $apiResponse['RefNo'] ) ) {
-                    $result = [ 'status' => false, 'errors' => $apiResponse['message'], 'redirect' => null ];
-                } elseif ( $apiResponse['Errors'] ) {
-                    $errorMessage = '';
-                    foreach ( $apiResponse['Errors'] as $key => $value ) {
-                        $errorMessage .= $value . PHP_EOL;
-                    }
-                    $result = [ 'status' => false, 'error' => $errorMessage, 'redirect' => null ];
-                    //remove created order from prestashop
-                    // is cart will be the same witch is great
-                    $order->delete();
-                } else {
-                    $hasAuthorize3ds = $this->hasAuthorize3DS( $apiResponse['PaymentDetails']['PaymentMethod']['Authorize3DS'] );
-                    $redirectTo      = $hasAuthorize3ds ?? $returnUrl;
-                    $result          = [ 'status' => true, 'errors' => null, 'redirect' => $redirectTo ];
-                }
-
-                exit( json_encode( $result ) );
-            case 1: //inline
-                $billingAddressData = [
-                    'name'         => $invoice->firstname . ' ' . $invoice->lastname,
-                    'phone'        => $invoice->phone,
-                    'country'      => $countryIsoCode,
-                    'state'        => $stateIsoCode,
-                    'email'        => $customer->email,
-                    'address'      => $invoice->address1,
-                    'city'         => $invoice->city,
-                    'zip'          => $invoice->postcode,
-                    'company-name' => $invoice->company,
-                ];
-
-                $shippingAddressData = [
-                    'ship-name'     => $invoice->firstname . ' ' . $invoice->lastname,
-                    'ship-country'  => $countryIsoCode,
-                    'ship-state'    => $stateIsoCode,
-                    'ship-city'     => $invoice->city,
-                    'ship-email'    => $customer->email,
-                    'ship-address'  => $invoice->address1,
-                    'ship-address2' => ! empty( $invoice->address2 ) ? $invoice->address2 : '',
-                ];
-
-                $productData[]                = [
-                    'type'     => 'PRODUCT',
-                    'name'     => 'Cart_' . $orderId,
-                    'price'    => $cart->getOrderTotal(),
-                    'tangible' => 0,
-                    'qty'      => 1,
-                ];
-                $inlineLinkParams['products'] = ( $productData );
-
-                $inlineLinkParams['currency']      = strtolower( $currency->iso_code );
-                $inlineLinkParams['language']      = $languageIsoCode;
-                $inlineLinkParams['return-method'] = [
-                    'type' => 'redirect',
-                    'url'  => $returnUrl
-                ];
-
-                $inlineLinkParams['test']             = Configuration::get( 'TWOCHECKOUT_DEMO' );
-                $inlineLinkParams['order-ext-ref']    = $orderId;
-                $inlineLinkParams['return-url']       = $returnUrl;
-                $inlineLinkParams['customer-ext-ref'] = $customer->email;
-                $inlineLinkParams['src']              = $source;
-                $inlineLinkParams['dynamic']          = 1;
-                $inlineLinkParams['merchant']         = Configuration::get( 'TWOCHECKOUT_SID' );
-                $inlineLinkParams                     = array_merge( $inlineLinkParams, $billingAddressData );
-                $inlineLinkParams                     = array_merge( $inlineLinkParams, $shippingAddressData );
-                $inlineLinkParams['signature']        = $this->tcoApi->getInlineSignature( $inlineLinkParams );
-
-                $inlineLinkParams['url_data']         = [
-                    'type' => 'redirect',
-                    'url'  => $returnUrl
-                ];
-                $inlineLinkParams['shipping_address'] = ( $shippingAddressData );
-                $inlineLinkParams['billing_address']  = ( $billingAddressData );
-
-                $redirectTo = $this->context->link->getModuleLink( 'twocheckout', 'inline', $inlineLinkParams );
-
-                break;
-            default: //Convert+
-
-                $buyLinkParams['name']          = $invoice->firstname . ' ' . $invoice->lastname;
-                $buyLinkParams['phone']         = $invoice->phone;
-                $buyLinkParams['country']       = $countryIsoCode;
-                $buyLinkParams['state']         = $stateIsoCode;
-                $buyLinkParams['email']         = $customer->email;
-                $buyLinkParams['address']       = $invoice->address1;
-                $buyLinkParams['address2']      = ! empty( $invoice->address2 ) ? $invoice->address2 : '';
-                $buyLinkParams['city']          = $invoice->city;
-                $buyLinkParams['ship-name']     = $invoice->firstname . ' ' . $invoice->lastname;
-                $buyLinkParams['ship-country']  = $countryIsoCode;
-                $buyLinkParams['ship-state']    = $stateIsoCode;
-                $buyLinkParams['ship-city']     = $invoice->city;
-                $buyLinkParams['ship-email']    = $customer->email;
-                $buyLinkParams['ship-address']  = $invoice->address1;
-                $buyLinkParams['ship-address2'] = ! empty( $invoice->address2 ) ? $invoice->address2 : '';
-                $buyLinkParams['zip']           = $invoice->postcode;
-                $buyLinkParams['company-name']  = $invoice->company;
-                $buyLinkParams['prod']          = 'Cart_' . $orderId;
-                $buyLinkParams['price']         = $cart->getOrderTotal();
-                $buyLinkParams['qty']           = 1;
-                $buyLinkParams['type']          = 'PRODUCT';
-                $buyLinkParams['tangible']      = 0;
-                $buyLinkParams['src']           = $source;
-                // url NEEDS a protocol(http or https)
-                $buyLinkParams['return-url']       = $returnUrl;
-                $buyLinkParams['return-type']      = 'redirect';
-                $buyLinkParams['expiration']       = time() + ( 3600 * 5 );
-                $buyLinkParams['order-ext-ref']    = $orderId;
-                $buyLinkParams['item-ext-ref']     = date( 'YmdHis' );
-                $buyLinkParams['customer-ext-ref'] = $customer->email;
-                $buyLinkParams['currency']         = strtolower( $currency->iso_code );
-                $buyLinkParams['language']         = $languageIsoCode;
-                $buyLinkParams['test']             = Configuration::get( 'TWOCHECKOUT_DEMO' );
-                // sid in this case is the merchant code
-                $buyLinkParams['merchant']  = Configuration::get( 'TWOCHECKOUT_SID' );
-                $buyLinkParams['dynamic']   = 1;
-                $buyLinkParams['signature'] = $this->generateSignature(
-                    $buyLinkParams,
-                    Configuration::get( 'TWOCHECKOUT_SECRET_WORD' )
-                );
-
-                $redirectTo = 'https://secure.2checkout.com/checkout/buy/?' . ( http_build_query( $buyLinkParams ) );
-
-        }
-
-        Tools::redirect( $redirectTo );
     }
 
 
@@ -1043,68 +944,6 @@ class Twocheckout extends \PaymentModule {
         return bin2hex( hash_hmac( 'sha256', $string, $secretWord, true ) );
     }
 
-    /**
-     * @param $params
-     *
-     * @return bool|mixed
-     * @throws \PrestaShopException
-     */
-    public function hookPaymentReturn( $params ) {
-
-        if ( ( ! isset( $params['order'] ) || $params['order']->module != $this->name ) || ! $this->active ) {
-            return false;
-        }
-
-        $requestParams = Tools::getAllValues();
-
-        /** @var $order \Order */
-        if ( $requestParams['refno'] ) {
-            $order = $params['order'];
-            if ( ! $order instanceof \Order ) {
-                PrestaShopLogger::addLog( sprintf( 'Invalid order from hookPaymentReturn at line %s in file %s',
-                    __LINE__,
-                    __FILE__ ) );
-                throw new PrestaShopException( 'Invalid order' );
-            }
-
-            $orderData = $this->tcoApi->call( "orders/" . $requestParams['refno'] . "/", [], 'GET' );
-            if ( isset( $orderData['RefNo'] ) && isset( $orderData['ExternalReference'] ) ) {
-
-                /**
-                 * Set the current state of the order in Processing
-                 * only  the first time, default is 0
-                 */
-
-                if ( ! $order->current_state ) {
-                    $order->setCurrentState( Configuration::get( 'PS_OS_PREPARATION' ) );
-                    $order->save();
-                }
-
-                //save REFNO to payment
-                $orderPayment = OrderPayment::getByOrderReference( $order->reference );
-                foreach ( $orderPayment as $payment ) {
-                    $invoice = $payment->getOrderInvoice( $order->id );
-                    if ( $invoice ) {
-                        $payment->transaction_id = $orderData['RefNo'];
-                        $payment->save();
-                    }
-                }
-
-                $order_states  = OrderState::getOrderStates( $order->id_lang );
-                $state_message = '';
-
-                foreach ( $order_states as $state ) {
-                    if ( $state['id_order_state'] === $order->current_state ) {
-                        $state_message = $state['name'];
-                    }
-                }
-                $this->smarty->assign( [ 'order' => $order, 'state' => $state_message ] );
-
-                return $this->fetch( 'module:twocheckout/views/templates/front/payment_return.tpl' );
-            }
-        }
-    }
-
 
     /**
      * @param        $delivery
@@ -1114,7 +953,7 @@ class Twocheckout extends \PaymentModule {
      *
      * @return array
      */
-    private function getBillingDetails( $delivery, string $stateCode, string $countryIsoCode, string $email = '' ) {
+    public function getBillingDetails( $delivery, string $stateCode, string $countryIsoCode, string $email = '' ) {
 
         $address = [
             'Address1'    => $delivery->address1,
@@ -1146,7 +985,7 @@ class Twocheckout extends \PaymentModule {
      *
      * @return array
      */
-    private function getItem( int $cart_id, float $total ) {
+    public function getItem( int $cart_id, float $total ) {
         $items[] = [
             'Code'             => null,
             'Quantity'         => 1,
@@ -1173,8 +1012,7 @@ class Twocheckout extends \PaymentModule {
      *
      * @return array
      */
-    private function getPaymentDetails( string $token, string $currency, int $cartId, int $orderId ) {
-
+    public function getPaymentDetails( string $token, string $currency, int $cartId ) {
         return [
             'Type'          => Configuration::get( 'TWOCHECKOUT_DEMO' ) == 1 ? 'TEST' : 'EES_TOKEN_PAYMENT',
             'Currency'      => strtolower( $currency ),
@@ -1182,9 +1020,9 @@ class Twocheckout extends \PaymentModule {
             'PaymentMethod' => [
                 'EesToken'           => $token,
                 'Vendor3DSReturnURL' => $this->context->link->getModuleLink( 'twocheckout', 'redirect3ds',
-                    [ 'action' => 'success', 'cart' => $cartId, 'order' => $orderId ], true ),
+                    [ 'action' => 'success', 'cart' => $cartId ], true ),
                 'Vendor3DSCancelURL' => $this->context->link->getModuleLink( 'twocheckout', 'redirect3ds',
-                    [ 'action' => 'cancel', 'cart' => $cartId, 'order' => $orderId ], true )
+                    [ 'action' => 'cancel', 'cart' => $cartId ], true )
             ]
         ];
     }
@@ -1207,7 +1045,7 @@ class Twocheckout extends \PaymentModule {
      * get customer ip or returns a default ip
      * @return mixed|string
      */
-    private function getCustomerIp() {
+    public function getCustomerIp() {
         if ( ! empty( $_SERVER['HTTP_CLIENT_IP'] ) ) {
             //ip from share internet
             $ip = $_SERVER['HTTP_CLIENT_IP'];
@@ -1222,5 +1060,29 @@ class Twocheckout extends \PaymentModule {
         }
 
         return '1.0.0.1';
+    }
+
+    public function checkActiveModule() {
+        $active  = false;
+        $modules = Hook::getHookModuleExecList( 'paymentOptions' );
+        if ( empty( $modules ) ) {
+            return;
+        }
+        foreach ( $modules as $module ) {
+            if ( $module['module'] == $this->name ) {
+                $active = true;
+            }
+        }
+
+        return $active;
+    }
+
+    public function hasPaidShipping( $shippingArr ) {
+        $total = 0;
+        foreach ( $shippingArr as $shipping => $valuesArr ) {
+            $total += $valuesArr['shipping_cost_tax_incl'];
+        }
+
+        return $total > 0;
     }
 }

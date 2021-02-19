@@ -3,8 +3,7 @@
 /**
  * Class TwocheckoutValidationModuleFrontController
  */
-class TwocheckoutIpnModuleFrontController extends ModuleFrontController
-{
+class TwocheckoutIpnModuleFrontController extends ModuleFrontController {
     /**
      * Ipn Constants
      *
@@ -43,62 +42,73 @@ class TwocheckoutIpnModuleFrontController extends ModuleFrontController
      */
     private $order;
 
+    private $history;
+
+    private $logger;
+
     /**
      * TwocheckoutIpnModuleFrontController constructor.
      */
-    public function __construct()
-    {
+    public function __construct() {
         parent::__construct();
 
-        $this->secretKey = Configuration::get('TWOCHECKOUT_SECRET_KEY');
+        $this->secretKey = Configuration::get( 'TWOCHECKOUT_SECRET_KEY' );
+        $this->logger    = new Twocheckout_Logger( __FILE__ );
+        $this->history   = new OrderHistory();
     }
 
     /**
      * @throws \Exception
      */
-    public function initContent()
-    {
+    public function initContent() {
         // I can't believe prestashop doesn't have a more reliable way
         // to check if a request is post...
-        if (strtoupper($_SERVER['REQUEST_METHOD']) !== 'POST') {
-            die;
+        try {
+            if ( strtoupper( $_SERVER['REQUEST_METHOD'] ) !== 'POST' ) {
+                die;
+            }
+
+            // This may seem like a bad idea but it's not
+            // There's not echoing of data, no sql queries, no other calls, no js, no nothing
+
+            $params = $_REQUEST;
+            if ( ! isset( $params['REFNOEXT'] ) && ( ! isset( $params['REFNO'] ) && empty( $params['REFNO'] ) ) ) {
+                throw new Exception( sprintf( 'Cannot identify order: "%s".',
+                    $params['REFNOEXT'] ) );
+            }
+
+            if ( ! $this->isIpnResponseValid( $params, $this->secretKey ) ) {
+                throw new Exception( sprintf( 'MD5 hash mismatch for 2Checkout IPN with date: "%s".',
+                    $params['IPN_DATE'] ) );
+            }
+
+            $this->order             = Order::getByCartId( (int) $params['REFNOEXT'] );
+            $this->history->id_order = (int) $this->order->id;
+
+            if ( ! Validate::isLoadedObject( $this->order ) ) {
+                throw new Exception( sprintf( 'Unable to load order with orderId %s. IPN failed.',
+                    $params['REFNOEXT'] ) );
+            }
+
+            // do not wrap this in a try catch
+            // it's intentionally left out so that the exceptions will bubble up
+            // and kill the script if one should arise
+            $this->_processFraud( $params );
+
+            if ( ! $this->_isFraud( $params ) ) {
+                $this->_processOrderStatus( $params );
+            }
+
+            // bestest way to return a response ever, go prestashop!
+            echo $this->_calculateIpnResponse(
+                $params,
+                $this->secretKey
+            );
+        } catch ( Exception $e ) {
+            $this->logger->error( sprintf( $this->trans( '2checkout by Verifone IPN Error: %s' ), $e->getMessage() ),
+                __LINE__ );
+            echo $this->trans( 'Error, check Prestashop Logs!' );
         }
-
-        // This may seem like a bad idea but it's not
-        // There's not echoing of data, no sql queries, no other calls, no js, no nothing
-        $params = $_REQUEST;
-
-        if (!isset($params['REFNOEXT']) && (!isset($params['REFNO']) && empty($params['REFNO']))) {
-            throw new Exception(sprintf('Cannot identify order: "%s".',
-                $params['REFNOEXT']));
-        }
-
-        if (!$this->isIpnResponseValid($params, $this->secretKey)) {
-            throw new Exception(sprintf('MD5 hash mismatch for 2Checkout IPN with date: "%s".',
-                $params['IPN_DATE']));
-        }
-
-        $this->order = new Order((int)$params['REFNOEXT']);
-
-        if (!Validate::isLoadedObject($this->order)) {
-            throw new Exception(sprintf('Unable to load order with orderId %s. IPN failed.',
-                $params['REFNOEXT']));
-        }
-
-        // do not wrap this in a try catch
-        // it's intentionally left out so that the exceptions will bubble up
-        // and kill the script if one should arise
-        $this->_processFraud($params);
-
-        if (!$this->_isFraud($params)) {
-            $this->_processOrderStatus($params);
-        }
-
-        // bestest way to return a response ever, go prestashop!
-        echo $this->_calculateIpnResponse(
-            $params,
-            $this->secretKey
-        );
         die;
     }
 
@@ -108,9 +118,8 @@ class TwocheckoutIpnModuleFrontController extends ModuleFrontController
      *
      * @return bool
      */
-    protected function _isFraud($params)
-    {
-        return (isset($params['FRAUD_STATUS']) && $params['FRAUD_STATUS'] === self::FRAUD_STATUS_DENIED);
+    protected function _isFraud( $params ) {
+        return ( isset( $params['FRAUD_STATUS'] ) && $params['FRAUD_STATUS'] === self::FRAUD_STATUS_DENIED );
     }
 
     /**
@@ -119,28 +128,28 @@ class TwocheckoutIpnModuleFrontController extends ModuleFrontController
      *
      * @return bool
      */
-    public function isIpnResponseValid($params, $secretKey)
-    {
-        $result = '';
+    public function isIpnResponseValid( $params, $secretKey ) {
+        $result       = '';
         $receivedHash = $params['HASH'];
-        foreach ($params as $key => $val) {
+        foreach ( $params as $key => $val ) {
 
-            if ($key != "HASH") {
-                if (is_array($val)) {
-                    $result .= $this->arrayExpand($val);
+            if ( $key != "HASH" ) {
+                if ( is_array( $val ) ) {
+                    $result .= $this->arrayExpand( $val );
                 } else {
-                    $size = strlen(stripslashes($val));
-                    $result .= $size . stripslashes($val);
+                    $size   = strlen( stripslashes( $val ) );
+                    $result .= $size . stripslashes( $val );
                 }
             }
         }
 
-        if (isset($params['REFNO']) && !empty($params['REFNO'])) {
-            $calcHash = $this->hmac($secretKey, $result);
-            if ($receivedHash === $calcHash) {
+        if ( isset( $params['REFNO'] ) && ! empty( $params['REFNO'] ) ) {
+            $calcHash = $this->hmac( $secretKey, $result );
+            if ( $receivedHash === $calcHash ) {
                 return true;
             }
         }
+
         return false;
     }
 
@@ -150,24 +159,23 @@ class TwocheckoutIpnModuleFrontController extends ModuleFrontController
      *
      * @return string
      */
-    private function _calculateIpnResponse($ipnParams, $secret_key)
-    {
-        $resultResponse = '';
+    private function _calculateIpnResponse( $ipnParams, $secret_key ) {
+        $resultResponse    = '';
         $ipnParamsResponse = [];
         // we're assuming that these always exist, if they don't then the problem is on avangate side
-        $ipnParamsResponse['IPN_PID'][0] = $ipnParams['IPN_PID'][0];
+        $ipnParamsResponse['IPN_PID'][0]   = $ipnParams['IPN_PID'][0];
         $ipnParamsResponse['IPN_PNAME'][0] = $ipnParams['IPN_PNAME'][0];
-        $ipnParamsResponse['IPN_DATE'] = $ipnParams['IPN_DATE'];
-        $ipnParamsResponse['DATE'] = date('YmdHis');
+        $ipnParamsResponse['IPN_DATE']     = $ipnParams['IPN_DATE'];
+        $ipnParamsResponse['DATE']         = date( 'YmdHis' );
 
-        foreach ($ipnParamsResponse as $key => $val) {
-            $resultResponse .= $this->arrayExpand((array)$val);
+        foreach ( $ipnParamsResponse as $key => $val ) {
+            $resultResponse .= $this->arrayExpand( (array) $val );
         }
 
         return sprintf(
             '<EPAYMENT>%s|%s</EPAYMENT>',
             $ipnParamsResponse['DATE'],
-            $this->hmac($secret_key, $resultResponse)
+            $this->hmac( $secret_key, $resultResponse )
         );
     }
 
@@ -176,13 +184,13 @@ class TwocheckoutIpnModuleFrontController extends ModuleFrontController
      *
      * @return string
      */
-    private function arrayExpand($array)
-    {
+    private function arrayExpand( $array ) {
         $retval = '';
-        foreach ($array as $key => $value) {
-            $size = strlen(stripslashes($value));
-            $retval .= $size . stripslashes($value);
+        foreach ( $array as $key => $value ) {
+            $size   = strlen( stripslashes( $value ) );
+            $retval .= $size . stripslashes( $value );
         }
+
         return $retval;
     }
 
@@ -192,20 +200,19 @@ class TwocheckoutIpnModuleFrontController extends ModuleFrontController
      *
      * @return string
      */
-    private function hmac($key, $data)
-    {
+    private function hmac( $key, $data ) {
         $b = 64; // byte length for md5
-        if (strlen($key) > $b) {
-            $key = pack("H*", md5($key));
+        if ( strlen( $key ) > $b ) {
+            $key = pack( "H*", md5( $key ) );
         }
 
-        $key = str_pad($key, $b, chr(0x00));
-        $ipad = str_pad('', $b, chr(0x36));
-        $opad = str_pad('', $b, chr(0x5c));
+        $key    = str_pad( $key, $b, chr( 0x00 ) );
+        $ipad   = str_pad( '', $b, chr( 0x36 ) );
+        $opad   = str_pad( '', $b, chr( 0x5c ) );
         $k_ipad = $key ^ $ipad;
         $k_opad = $key ^ $opad;
 
-        return md5($k_opad . pack("H*", md5($k_ipad . $data)));
+        return md5( $k_opad . pack( "H*", md5( $k_ipad . $data ) ) );
     }
 
     /**
@@ -214,55 +221,88 @@ class TwocheckoutIpnModuleFrontController extends ModuleFrontController
      * @throws \PrestaShopException
      * @throws \Exception
      */
-    private function _processOrderStatus($params)
-    {
+    private function _processOrderStatus( $params ) {
         $orderStatus = $params['ORDERSTATUS'];
-        if (!empty($orderStatus)) {
-            switch (trim($orderStatus)) {
-                case self::ORDER_STATUS_PENDING:
-                case self::ORDER_STATUS_PURCHASE_PENDING:
-                    if(!$this->_isOrderCompleted())
-                        $this->order->setCurrentState(Configuration::get('PS_OS_PREPARATION'));
-                    break;
-                case self::ORDER_STATUS_PENDING_APPROVAL:
-                case self::ORDER_STATUS_PAYMENT_AUTHORIZED:
-                    if(!$this->_isOrderCompleted()) {
-                        $this->order->setCurrentState(Configuration::get('PS_OS_PREPARATION'));
-                    }
-                    break;
+        if ( ! empty( $orderStatus ) ) {
+            if( ! $this->_isOrderRefunded()) {
+                switch ( trim( $orderStatus ) ) {
+                    case self::ORDER_STATUS_PENDING:
+                    case self::ORDER_STATUS_PURCHASE_PENDING:
+                        if ( ! $this->_isOrderCompleted() ) {
+                            $this->history->changeIdOrderState( (int) Configuration::get( 'PS_OS_PREPARATION' ),
+                                $this->order,
+                                true );
 
-                case self::ORDER_STATUS_COMPLETE:
-                    $this->order->setCurrentState(Configuration::get('PS_OS_PAYMENT'));
-                    $this->_createTransactionId($params);
-                    $this->_isChargeBack($params);
-                    break;
+                            $this->history->save();
+                        }
+                        break;
+                    case self::ORDER_STATUS_PENDING_APPROVAL:
+                    case self::ORDER_STATUS_PAYMENT_AUTHORIZED:
+                        if ( ! $this->_isOrderCompleted() ) {
+                            $this->history->changeIdOrderState( (int) Configuration::get( 'PS_OS_PREPARATION' ),
+                                $this->order,
+                                true );
 
-                case self::ORDER_STATUS_REFUND:
-                    $this->order->setCurrentState(Configuration::get('PS_OS_REFUND'));
-                    break;
+                            $this->history->save();
+                        }
+                        break;
 
-                default:
-                    throw new Exception('Cannot handle Ipn message type for message');
+                    case self::ORDER_STATUS_COMPLETE:
+                        if ( ! $this->_isOrderCompleted() ) {
+                            $this->history->changeIdOrderState( (int) Configuration::get( 'PS_OS_PAYMENT' ),
+                                $this->order,
+                                true );
+
+                            $this->history->save();
+                            $this->_createTransactionId( $params );
+                            $this->_isChargeBack( $params );
+                        }
+                        break;
+
+                    case self::ORDER_STATUS_REFUND:
+                        $this->order->setCurrentState( Configuration::get( 'PS_OS_REFUND' ) );
+                        break;
+
+                    default:
+                        throw new Exception( 'Cannot handle Ipn message type for message' );
+                }
             }
 
             $this->order->save();
         }
     }
 
-    private function _isOrderCompleted(){
-        return $this->order->getCurrentOrderState() == Configuration::get('PS_OS_PAYMENT');
+    private function _isOrderCompleted() {
+        $current_order_status_id = (int)$this->order->getCurrentState();
+        $payment_completed_id = (int)Configuration::get( 'PS_OS_PAYMENT' );
+        return ($current_order_status_id === $payment_completed_id);
+
+    }
+
+    private function _isOrderRefunded() {
+        $current_order_status_id = (int)$this->order->getCurrentState();
+        $payment_refund_id = (int)Configuration::get( 'PS_OS_REFUND' );
+        return ($current_order_status_id === $payment_refund_id);
+
     }
 
     /**
      * @param $params
      */
-    private function _createTransactionId($params)
-    {
-        $orderPayment = OrderPayment::getByOrderReference($this->order->reference);
-        foreach($orderPayment as $payment)
-        {
-            $payment->transaction_id = $params['REFNO'];
-            $payment->save();
+    private function _createTransactionId( $params ) {
+        if ( $this->order->hasInvoice() ) {
+            $invoice = $this->order->getInvoicesCollection()->getFirst();
+            //save REFNO to payment
+            if ( $invoice ) {
+                $payment      = OrderPayment::getByInvoiceId( $invoice->id );
+                $firstPayment = $payment->getFirst();
+                $payment      = new OrderPayment( $firstPayment->id );
+
+                if ( empty( $payment->transaction_id ) ) {
+                    $payment->transaction_id = $params['REFNO'];
+                    $payment->save();
+                }
+            }
         }
     }
 
@@ -271,18 +311,26 @@ class TwocheckoutIpnModuleFrontController extends ModuleFrontController
      *
      * @throws \PrestaShopException
      */
-    private function _processFraud($params)
-    {
+    private function _processFraud( $params ) {
 
-        if (isset($params['FRAUD_STATUS'])) {
-            switch (trim($params['FRAUD_STATUS'])) {
-                case self::FRAUD_STATUS_DENIED:
-                    $this->order->setCurrentState(Configuration::get('PS_OS_ERROR'));
-                    break;
+        if ( isset( $params['FRAUD_STATUS'] ) ) {
+            if(  ! $this->_isOrderRefunded() ) {
+                switch ( trim( $params['FRAUD_STATUS'] ) ) {
+                    case self::FRAUD_STATUS_DENIED:
+                        $this->history->changeIdOrderState( (int) Configuration::get( 'PS_OS_ERROR' ), $this->order,
+                            true );
+                        $this->history->save();
+                        break;
 
-                case self::FRAUD_STATUS_APPROVED:
-                    $this->order->setCurrentState(Configuration::get('PS_OS_PREPARATION'));
-                    break;
+                    case self::FRAUD_STATUS_APPROVED:
+                        if ( ! $this->_isOrderCompleted() ) {
+                            $this->history->changeIdOrderState( (int) Configuration::get( 'PS_OS_PREPARATION' ),
+                                $this->order,
+                                true );
+                            $this->history->save();
+                        }
+                        break;
+                }
             }
 
             $this->order->save();
@@ -291,10 +339,10 @@ class TwocheckoutIpnModuleFrontController extends ModuleFrontController
 
     /**
      * check for Chargeback resolution and code & add a message (private) to order
+     *
      * @param $params
      */
-    private function _isChargeBack($params)
-    {
+    private function _isChargeBack( $params ) {
         $reasons = [
             'UNKNOWN'                  => 'Unknown', //default
             'MERCHANDISE_NOT_RECEIVED' => 'Order not fulfilled/not delivered',
@@ -310,27 +358,27 @@ class TwocheckoutIpnModuleFrontController extends ModuleFrontController
         ];
 
         // we need to mock up a message with some params in order to add this note
-        if (!empty($params['CHARGEBACK_RESOLUTION']) && !empty($params['CHARGEBACK_REASON_CODE'])) {
-            $thread = new CustomerThreadCore();
-            $thread->email = 'ChargeBack@2checkout.com';
-            $thread->status = 'open';
-            $thread->token = $this->order->reference; // we need to fill this too (i chose the reference)
-            $thread->id_shop = $this->order->id_shop;
-            $thread->id_lang = $this->order->id_lang;
-            $thread->id_contact = 0;
+        if ( ! empty( $params['CHARGEBACK_RESOLUTION'] ) && ! empty( $params['CHARGEBACK_REASON_CODE'] ) ) {
+            $thread              = new CustomerThreadCore();
+            $thread->email       = 'ChargeBack@2checkout.com';
+            $thread->status      = 'open';
+            $thread->token       = $this->order->reference; // we need to fill this too (i chose the reference)
+            $thread->id_shop     = $this->order->id_shop;
+            $thread->id_lang     = $this->order->id_lang;
+            $thread->id_contact  = 0;
             $thread->id_customer = $this->order->id_customer;
-            $thread->id_order = $this->order->id;
+            $thread->id_order    = $this->order->id;
             $thread->save();
 
-            $why = $reasons[trim($params['CHARGEBACK_REASON_CODE'])] ?? $reasons['UNKNOWN'];
+            $why     = $reasons[ trim( $params['CHARGEBACK_REASON_CODE'] ) ] ?? $reasons['UNKNOWN'];
             $message = '2Checkout chargeback status is ' . $params['CHARGEBACK_RESOLUTION'];
             $message .= '. Reason: ' . $why . '!';
 
-            $orderMessage = new CustomerMessageCore();
+            $orderMessage                     = new CustomerMessageCore();
             $orderMessage->id_customer_thread = $thread->id;
-            $orderMessage->ip_address = null;
-            $orderMessage->message = $message;
-            $orderMessage->private = true;
+            $orderMessage->ip_address         = null;
+            $orderMessage->message            = $message;
+            $orderMessage->private            = true;
             $orderMessage->save();
         }
     }
