@@ -78,7 +78,7 @@ class Twocheckout extends \PaymentModule {
     public function __construct() {
         $this->name                   = 'twocheckout';
         $this->tab                    = 'payments_gateways';
-        $this->version                = '1.0.0';
+        $this->version                = '1.2.0';
         $this->ps_versions_compliancy = [ 'min' => '1.7', 'max' => _PS_VERSION_ ];
         $this->author                 = '2Checkout by Verifone';
         $this->controllers            = [ 'validation' ];
