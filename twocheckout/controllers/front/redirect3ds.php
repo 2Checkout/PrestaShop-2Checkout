@@ -81,10 +81,14 @@ class TwocheckoutRedirect3dsModuleFrontController extends ModuleFrontController
             Tools::redirect('index.php?controller=order&step=1');
         }
 
-        $redirectUrl = 'index.php?controller=order-confirmation&id_cart=' . Tools::getValue('cart') .
-            '&id_module=' . $this->module->id .
-            '&id_order=' . Tools::getValue('order') .
-            '&key=' . $customer->secure_key;
+        $redirectUrl = $this->context->link->getModuleLink( $this->module->name, 'paymentCallback',
+            [
+                'id_cart'   => $cart->id,
+                'id_module' => (int) $this->module->id,
+                'key'       => $customer->secure_key,
+                'refno' => $refNo
+            ],
+            true );
 
         return Tools::redirect($redirectUrl);
     }

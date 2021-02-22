@@ -70,7 +70,8 @@ class TwoCheckoutApi
 
     /**
      * @param null $sellerId
-     * @return TwoCheckoutApi
+     *
+     * @return TwocheckoutApi
      */
     public function setSellerId($sellerId)
     {
@@ -89,7 +90,8 @@ class TwoCheckoutApi
 
     /**
      * @param null $secretKey
-     * @return TwoCheckoutApi
+     *
+     * @return TwocheckoutApi
      */
     public function setSecretKey($secretKey)
     {

@@ -6,7 +6,7 @@ window.addEventListener('load', function () {
     component.mount('#card-element');
 
     $('body').on('click', '.ps-shown-by-js', function (e) {
-        if ($('#conditions-to-approve').serialize() === '') {
+        if ($('#conditions-to-approve').length && $('#conditions-to-approve').serialize() === '') {
             $('#placeOrderTco').attr('disabled', 'disabled');
         } else {
             $('#placeOrderTco').attr('disabled', false);
